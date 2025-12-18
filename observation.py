@@ -1,29 +1,59 @@
 # observation.py
+from __future__ import annotations
+
+from enum import Enum
+from typing import Tuple, List
+
 import numpy as np
-from enum import Enum, auto
+
 
 class ObservationFrequency(Enum):
-    ANNUAL = auto()
-    MONTHLY = auto()
-    DAILY = auto()
-
-def get_observation_indices(maturity_years: float, steps_per_year: int, freq: ObservationFrequency):
     """
-    Returns time indices at which autocall observations occur.
-    Always includes maturity.
+    Frequency of product observations / call dates.
     """
-    n_steps = int(maturity_years * steps_per_year)
+    ANNUAL = 1
+    SEMI_ANNUAL = 2
+    QUARTERLY = 4
+    MONTHLY = 12
 
-    if freq == ObservationFrequency.ANNUAL:
-        step_gap = steps_per_year
-    elif freq == ObservationFrequency.MONTHLY:
-        step_gap = max(1, steps_per_year // 12)
-    elif freq == ObservationFrequency.DAILY:
-        step_gap = 1
-    else:
-        raise ValueError("Unknown observation frequency")
+    def observations_per_year(self) -> int:
+        return {
+            ObservationFrequency.ANNUAL: 1,
+            ObservationFrequency.SEMI_ANNUAL: 2,
+            ObservationFrequency.QUARTERLY: 4,
+            ObservationFrequency.MONTHLY: 12,
+        }[self]
 
-    obs_indices = np.arange(step_gap, n_steps + 1, step_gap, dtype=int)
-    obs_indices[-1] = n_steps
-    obs_indices = np.unique(obs_indices)
-    return obs_indices, n_steps
+
+def get_observation_indices(
+    maturity_years: float,
+    steps_per_year: int,
+    freq: ObservationFrequency,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Returns:
+      - obs_indices: integer time indices (0..n_steps) of observation dates
+      - obs_times:   the same dates in years (floats)
+
+    Example: 5Y maturity, 252 steps/year, ANNUAL freq
+      -> obs_indices ~ [252, 504, 756, 1008, 1260]
+    """
+    n_steps = int(round(maturity_years * steps_per_year))
+    if n_steps <= 0:
+        raise ValueError("maturity_years * steps_per_year must be >= 1")
+
+    obs_per_year = freq.observations_per_year()
+    # step interval between observation dates
+    step_interval = int(round(steps_per_year / obs_per_year))
+
+    # generate observation indices (exclude t=0, include final maturity)
+    obs_indices: List[int] = list(range(step_interval, n_steps + 1, step_interval))
+
+    # enforce that the last observation is exactly maturity
+    if obs_indices[-1] != n_steps:
+        obs_indices[-1] = n_steps
+
+    obs_indices_arr = np.array(obs_indices, dtype=int)
+    obs_times_arr = obs_indices_arr / steps_per_year
+
+    return obs_indices_arr, obs_times_arr
