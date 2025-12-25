@@ -25,7 +25,6 @@ class Model:
     pricer: Optional["MonteCarloPricer"] = None   # type: ignore[name-defined]
     greeks: Optional["Greeks"] = None             # type: ignore[name-defined]
 
-    #The following are default params that can be overwritten in main.py by specifying different ones.
     def __init__(
         self,
         *,
@@ -120,6 +119,8 @@ class Model:
 
         self._build_correlations()
 
+    def build_correlation(self) -> None:
+        self._build_correlations()
 
     def _build_correlations(self) -> None:
         self._chol_2 = None
@@ -390,6 +391,10 @@ class Model:
         times = np.linspace(0.0, maturity_years, n_steps + 1)
         df_curve = self._df_at_times(times)
 
+        # Curve-consistent drift: stepwise forward rates implied by DF(0,t)
+        # Ensures E[DF(0,T) * S_T] = S0 when a curve is provided.
+        log_df = np.log(np.maximum(df_curve, 1e-300))
+        fwd_rates = -(log_df[1:] - log_df[:-1]) / dt  # length n_steps
         n_paths = self.n_paths
         if antithetic:
             if n_paths % 2 != 0:
@@ -408,7 +413,8 @@ class Model:
 
         for k in range(n_steps):
             dW = Z[:, k] * sqrt_dt
-            drift = (self.r0 - 0.5 * self.sigma**2) * dt
+            r_step = float(fwd_rates[k])
+            drift = (r_step - 0.5 * self.sigma**2) * dt
             diff = self.sigma * dW
             S[:, k + 1] = S[:, k] * np.exp(drift + diff)
 
@@ -433,6 +439,8 @@ class Model:
         times = np.linspace(0.0, maturity_years, n_steps + 1)
         df_curve = self._df_at_times(times)
 
+        log_df = np.log(np.maximum(df_curve, 1e-300))
+        fwd_rates = -(log_df[1:] - log_df[:-1]) / dt  # length n_steps
         H = float(self.rough_H)
         nu = float(self.rough_nu)
 
@@ -460,9 +468,8 @@ class Model:
         else:
             Z_S = self.rng.standard_normal(size=(n_paths, n_steps))
 
-        r_t = self.r0
-
         for k in range(n_steps):
+            r_t = float(fwd_rates[k])
             sigma_k = sigma_t[:, k]
             dW_S = Z_S[:, k] * sqrt_dt
 
@@ -499,6 +506,8 @@ class Model:
         times = np.linspace(0.0, maturity_years, n_steps + 1)
         df_curve = self._df_at_times(times)
 
+        log_df = np.log(np.maximum(df_curve, 1e-300))
+        fwd_rates = -(log_df[1:] - log_df[:-1]) / dt  # length n_steps
         H = float(self.rough_H)
         nu = float(self.rough_nu)
         alpha = float(self.rough_alpha)
@@ -535,9 +544,8 @@ class Model:
         else:
             Z_S = self.rng.standard_normal(size=(n_paths, n_steps))
 
-        r_t = self.r0
-
         for k in range(n_steps):
+            r_t = float(fwd_rates[k])
             sigma_k = sigma_t[:, k]
             dW_S = Z_S[:, k] * sqrt_dt
 
@@ -568,6 +576,8 @@ class Model:
         times = np.linspace(0.0, maturity_years, n_steps + 1)
         df_curve = self._df_at_times(times)
 
+        log_df = np.log(np.maximum(df_curve, 1e-300))
+        fwd_rates = -(log_df[1:] - log_df[:-1]) / dt  # length n_steps
         n_paths = self.n_paths
         if antithetic:
             if n_paths % 2 != 0:
@@ -596,7 +606,7 @@ class Model:
             dv = self.kappa * (self.theta - v_t) * dt + self.xi * sqrt_v * dW_v
             v_next = np.maximum(v_t + dv, 1e-12)
 
-            r_t = self.r0
+            r_t = float(fwd_rates[k])
 
             dlogS = (r_t - 0.5 * v_t) * dt + sqrt_v * dW_S
             S_next = S[:, k] * np.exp(dlogS)
@@ -739,10 +749,12 @@ class Model:
         S[:, 0] = self.s0
         
         df_curve = self._df_at_times(times)
+        log_df = np.log(np.maximum(df_curve, 1e-300))
+        fwd_rates = -(log_df[1:] - log_df[:-1]) / dt  # length n_steps
         df[:] = df_curve[None, :]
-        fwd = self._fwd_rate_at_times(times)  # length n_steps+1
+        # Drift uses curve-implied stepwise forwards for consistency with df_curve
         for k in range(n_steps):
-            r_k = 0.0# interprete as spot = fwrd fwd[k] ie driftless under T-forward measure approximation
+            r_k = float(fwd_rates[k])  # curve-consistent drift
             vol = np.sqrt(np.maximum(v[:, k], 0.0))
             #S[:, k + 1] = S[:, k] * np.exp((r_k - 0.5 * vol * vol) * dt + vol * dW_S[:, k])
             if not np.isfinite(dt):

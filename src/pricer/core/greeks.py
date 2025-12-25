@@ -31,6 +31,42 @@ class Greeks:
     model: Model
     pricer: MonteCarloPricer
 
+    def _resolve_vol_param(self, vol_param: str) -> str:
+        """Resolve which parameter Vega/Vanna/Volga should bump.
+
+        vol_param='auto' selects a model-appropriate knob:
+        - GBM (flat vol): 'sigma'
+        - Heston: 'v0'
+        - Rough Bergomi: 'xi0_level' if xi0_values exists, else 'rough_nu'
+        - RFSV / ROUGH_FBM: 'rough_nu'
+        """
+        if vol_param != "auto":
+            return vol_param
+
+        vp = getattr(self.model, "vol_process", None)
+        if vp is None or str(vp).upper() in ("FLAT",):
+            return "sigma"
+
+        vp_u = str(vp).upper()
+        if vp_u == "HESTON":
+            return "v0"
+        if vp_u == "RBERGOMI":
+            return "xi0_level" if getattr(self.model, "xi0_values", None) is not None else "rough_nu"
+        if vp_u in ("RFSV", "ROUGH_FBM"):
+            return "rough_nu"
+
+        return "sigma"
+
+    def vega_meaning(self, vol_param: str = "auto") -> str:
+        p = self._resolve_vol_param(vol_param)
+        meanings = {
+            "sigma": "Vega wrt GBM volatility σ (per +1 vol point = +1%).",
+            "v0": "Vega wrt Heston initial variance v0 (per +1% relative bump in v0).",
+            "xi0_level": "Vega wrt rough Bergomi ξ0 level (per +1% scale of ξ0 curve).",
+            "rough_nu": "Vega wrt rough vol-of-vol ν (per +1% relative bump in ν).",
+        }
+        return meanings.get(p, f"Vega wrt '{p}' (per +1% bump).")
+
 
     def _get_rng_state(self) -> Dict[str, Any]:
         return copy.deepcopy(self.model.rng.bit_generator.state)
@@ -238,11 +274,12 @@ class Greeks:
     def vega(
         self,
         product: BaseProduct,
-        vol_param: str = "sigma",
+        vol_param: str = "auto",
         rel_bump: float = 0.01,
         central: bool = True,
     ) -> float:
         """Sensitivity wrt chosen vol knob, reported per +1% move."""
+        vol_param = self._resolve_vol_param(vol_param)
         # parameter() returns derivative per 1 unit of the knobASSERT; convert to per 1%.
         dP_dparam = self.parameter(product, param_name=vol_param, rel_bump=rel_bump, central=central)
         return float(dP_dparam) * 0.01
@@ -250,10 +287,11 @@ class Greeks:
     def volga(
         self,
         product: BaseProduct,
-        vol_param: str = "sigma",
+        vol_param: str = "auto",
         rel_bump: float = 0.01,
     ) -> float:
         """Second derivative wrt chosen vol knob, reported per (1%)^2."""
+        vol_param = self._resolve_vol_param(vol_param)
         h = self._vol_bump_size(vol_param, rel_bump)
         base_state = self._get_rng_state()
 
@@ -272,11 +310,12 @@ class Greeks:
     def vanna(
         self,
         product: BaseProduct,
-        vol_param: str = "sigma",
+        vol_param: str = "auto",
         rel_bump: float = 0.01,
         spot_attr: str = "s0",
     ) -> float:
         """Cross derivative d^2P/(dS d vol_knob), reported per 1% in the vol knob."""
+        vol_param = self._resolve_vol_param(vol_param)
         s0 = getattr(self.model, spot_attr)
         if s0 == 0:
             raise ValueError("Cannot bump zero spot for vanna")

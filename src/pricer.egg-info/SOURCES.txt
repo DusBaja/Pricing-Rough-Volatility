@@ -19,5 +19,6 @@ src/pricer/market/xi0_builder.py
 src/pricer/vanilla_mc/vanilla_mc.py
 src/pricer/vanilla_mc/vanilla_mc_surface.py
 tests/test_expiry_batch.py
+tests/test_martingale.py
 tests/test_single_quote.py
 tests/test_surface.py
