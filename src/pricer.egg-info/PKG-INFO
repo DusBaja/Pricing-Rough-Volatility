@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: pricer
+Version: 0.1.0
+Summary: Rough volatility pricing & calibration framework
+Requires-Python: >=3.10
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: scipy
+Requires-Dist: openpyxl

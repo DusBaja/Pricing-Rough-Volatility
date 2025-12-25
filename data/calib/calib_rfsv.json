@@ -1,0 +1,31 @@
+{
+  "model": "rfsv",
+  "cut": 0.02,
+  "fun": 0.0001019648882203544,
+  "params": {
+    "H": 0.1,
+    "nu": 0.09888881885290243,
+    "alpha": 1.9995561213438,
+    "m": 0.0
+  },
+  "meta": {
+    "exclude_shortest": 0.0
+  },
+  "val_date": "2025-12-15",
+  "surface": "OptionsSX5E.xlsx",
+  "curve": "EURvs3MEuribor-Funding.xlsx",
+  "seed": 12345,
+  "steps_per_year": 128,
+  "npaths_obj": 50000,
+  "npaths_report": 100000,
+  "xi0_times": [
+    0.010958904109589041,
+    0.08767123287671233,
+    0.18356164383561643
+  ],
+  "xi0_values": [
+    0.014369322157881712,
+    0.017243727732693365,
+    0.0230239042112183
+  ]
+}

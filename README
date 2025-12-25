@@ -1,0 +1,44 @@
+# Autocall pricing with several vol models (Heston, Rough Volatility classical, Bergomi Rough Volatility...) and stochastic rates. 
+Calibrated on SX5E and Euribor 3M (funding impact).
+
+End-to-end framework for:
+- Vanilla calibration on SX5E implied vol surface (Bloomberg export)
+- Pricing structured products (Athena / Phoenix)
+- Model comparison and model-consistent Greeks (Delta/Gamma + model-aware Vega/Vanna/Volga + curve DV01)
+
+## Models implemented
+- GBM (Black–Scholes)
+- Heston
+- rBergomi
+- RFSV
+- rough_fbm
+- Heston + Hull–White (hybrid)
+
+## Installation
+From the repo root:
+```bash
+pip install -e 
+```
+
+## Calibration
+Example (rBergomi):
+```bash
+pricer-calibrate --model rbergomi \
+  --curve data/raw/EURvs3MEuribor-Funding.xlsx \
+  --surface data/raw/OptionsSX5E.xlsx
+```
+## Pricing
+Example (rBergomi):
+```bash
+pricer --model rbergomi --s0 100 \
+  --curve data/raw/EURvs3MEuribor-Funding.xlsx \
+  --surface data/raw/OptionsSX5E.xlsx
+```
+The script loads calib_<model>.json builds the model with the funding curve, prices the default structured product and prints price + SE + Greeks: Delta, Gamma and model-aware Vega/Vanna/Volga (e.g. v0 for Heston, xi0_level for rBergomi, rough_nu for rough models), curve DV01 via parallel shift of the discount curve (disc_rates_parallel).
+
+## Tests
+pytest -q
+
+## Notes
+Discounting uses the curve (DV01 computed by bumping the whole curve by 1bp).
+Greeks use bump-and-reprice with Common Random Numbers for variance reduction.

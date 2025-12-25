@@ -6,7 +6,7 @@ from typing import Dict, Tuple, Optional
 
 import numpy as np
 
-from observation import ObservationFrequency, get_observation_indices
+from pricer.core.observation import ObservationFrequency, get_observation_indices
 
 
 class BaseProduct(ABC):

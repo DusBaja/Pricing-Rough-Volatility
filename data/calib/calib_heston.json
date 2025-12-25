@@ -1,0 +1,22 @@
+{
+  "model": "heston",
+  "cut": 0.049999999999999996,
+  "fun": 2.5474110921569785e-05,
+  "params": {
+    "kappa": 2.0,
+    "theta": 0.0230239042112183,
+    "v0": 0.021819497772157272,
+    "xi": 1.2761293141684213,
+    "rho_sv": -0.42216495256757736
+  },
+  "meta": {
+    "exclude_shortest": 1.0
+  },
+  "val_date": "2025-12-15",
+  "surface": "OptionsSX5E.xlsx",
+  "curve": "EURvs3MEuribor-Funding.xlsx",
+  "seed": 12345,
+  "steps_per_year": 128,
+  "npaths_obj": 150000,
+  "npaths_report": 300000
+}

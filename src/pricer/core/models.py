@@ -1,56 +1,46 @@
-# models.py
 from __future__ import annotations
-
 from typing import Optional, Dict, Tuple
-
 import numpy as np
+import math
 
 
 class Model:
     """
-    Unified model class that can represent:
+    Model class with the following available models:
 
-    - GBM spot + flat rate
-    - Heston spot + flat rate
-    - Heston spot + Hull–White rate (hybrid)
-    - Pure rate (flat or Hull–White)
+    - GBM spot + flat rate (classic one: 1 factor sto spot)
+    - Heston spot + flat rate (classic Heston: 2 factors sto ie vol and spot)
+    - Heston spot + Hull–White rate (hybrid Heston: 3 factors sto ie vol, spot and rate)
+    - Pure rate (flat or Hull–White: to be able to decompose rate effect)
 
-    The spot dynamics are always exponential (GBM-style):
-
-        dS_t = S_t (r_t dt + sqrt(v_t) dW_S)
-
+    The spot dynamics are always exponential (GBM resolution):dS_t = S_t (r_t dt + sqrt(v_t) dW_S)
     where:
         - GBM: v_t = sigma^2 (constant).
         - Heston: v_t follows the Heston SDE.
-
+        - Different rough models whose dynamic we indicate. 
     The rate dynamics are:
         - FLAT: r_t = r0
         - HULLWHITE: dr_t = a (b - r_t) dt + sigma_r dW_r
     """
-
-    # These are created later (e.g. in main.py) to avoid circular imports:
-    #   model.pricer = MonteCarloPricer(...)
-    #   model.greeks = Greeks(model, model.pricer)
     pricer: Optional["MonteCarloPricer"] = None   # type: ignore[name-defined]
     greeks: Optional["Greeks"] = None             # type: ignore[name-defined]
 
+    #The following are default params that can be overwritten in main.py by specifying different ones.
     def __init__(
         self,
         *,
-        # which sub-models are active
         spot_process: Optional[str] = "GBM",      # "GBM", "HESTON" or None
         rate_process: Optional[str] = "FLAT",     # "FLAT", "HULLWHITE", or None
-        vol_process: Optional[str] = "FLAT",      # "FLAT", "HESTON", "ROUGH_FBM","RFSV"  or None
+        vol_process: Optional[str] = "FLAT",      # "FLAT", "HESTON", "ROUGH_FBM","RFSV","RBERGOMI"  or None
 
-        # common simulation controls
         steps_per_year: int = 252,
         n_paths: int = 20_000,
         seed: Optional[int] = 42,
 
-        # Spot GBM parameters
         s0: float = 100.0,
-        sigma: float = 0.20,          # used when spot_process="GBM"
-
+        sigma: float = 0.20,  # used when spot_process="GBM"
+        xi0_times: Optional[np.ndarray] = None,
+        xi0_values: Optional[np.ndarray] = None,
         # Heston parameters (used when spot_process="HESTON")
         v0: float = 0.04,
         kappa: float = 2.0,
@@ -62,15 +52,16 @@ class Model:
         # log sigma_t is either:
         #   ROUGH_FBM: log sigma_t = log(sigma) + nu * W^H_t - 0.5 * nu^2 t^(2H)
         #   RFSV:      dX_t = nu dW^H_t - alpha (X_t - m) dt,  sigma_t = exp(X_t)
-        rough_H: float = 0.10,        # Hurst exponent, 0 < H < 0.5
+        rough_H: float = 0.10,        # Hurst exponent, 0 < H < 0., we fixed it based on Rosembaum's paper for better calibration (one param less)
         rough_nu: float = 0.30,       # vol-of-vol in log space
         rough_alpha: float = 5e-4,    # mean reversion speed for RFSV (per year)
         rough_m: Optional[float] = None,  # mean of X_t; defaults to log(sigma)
+        rough_rho: float = -0.70,    # leverage corr between spot and vol driver (rough Bergomi)
 
-
-        # rate parameters
-        r0: float = 0.02,             # flat or initial short rate
-
+        r0: float = 0.02,             # flat and initial short rate
+        disc_times: Optional[np.ndarray] = None,
+        disc_rates: Optional[np.ndarray] = None,
+        
         # Hull–White
         a: float = 0.1,
         b: float = 0.02,
@@ -78,46 +69,45 @@ class Model:
 
         # cross correlations (for Heston+Hull–White hybrid)
         rho_sr: float = 0.3,
-        rho_vr: float = 0.2,
-    ):
-        # process types
+        rho_vr: float = 0.2):
+    
         self.spot_process = spot_process.upper() if spot_process else None
         self.rate_process = rate_process.upper() if rate_process else None
         self.vol_process = vol_process.upper() if vol_process else None
-        # Backward-compatible alias
+        
         if self.vol_process == "ROUGH":
             self.vol_process = "ROUGH_FBM"
-
-        # simulation controls
+        
         self.steps_per_year = steps_per_year
         self.n_paths = n_paths
         self.seed = seed
         self.rng = np.random.default_rng(seed)
 
-        # GBM / spot params
         self.s0 = s0
         self.sigma = sigma
+        self.xi0_times = None if xi0_times is None else np.asarray(xi0_times, dtype=float)
+        self.xi0_values = None if xi0_values is None else np.asarray(xi0_values, dtype=float)
 
-        # Heston params
         self.v0 = v0
         self.kappa = kappa
         self.theta = theta
         self.xi = xi
         self.rho_sv = rho_sv
 
-        # Rough volatility params
         self.rough_H = rough_H
         self.rough_nu = rough_nu
         self.rough_alpha = rough_alpha
-        # if not provided, center X_t around log(sigma)
+        # if rough_m is not provided, we center X_t around log(sigma)
         #self.rough_m = np.log(sigma) if rough_m is None else rough_m
         # rough_m is an offset in log-space.
-        # Effective log level used by rough models is: log(sigma) + rough_m
+        # The effective log level used by rough models is: log(sigma) + rough_m
         # If not provided, default to 0.0 so sigma remains the baseline.
         self.rough_m = 0.0 if rough_m is None else float(rough_m)
+        self.rough_rho = float(rough_rho)
 
-        # rate params
         self.r0 = r0
+        self.disc_times = None if disc_times is None else np.asarray(disc_times, dtype=float)
+        self.disc_rates = None if disc_rates is None else np.asarray(disc_rates, dtype=float)
         self.a = a
         self.b = b
         self.sigma_r = sigma_r
@@ -125,28 +115,21 @@ class Model:
         # cross correlations
         self.rho_sr = rho_sr
         self.rho_vr = rho_vr
-
-        # internal Cholesky factors
         self._chol_2 = None   # for (S, v)
         self._chol_3 = None   # for (S, v, r)
 
         self._build_correlations()
 
-    # --------------------------------------------------------
-    # internal: build correlations
-    # --------------------------------------------------------
 
     def _build_correlations(self) -> None:
         self._chol_2 = None
         self._chol_3 = None
 
-        # 2D correlation for Heston with flat rate
         if self.spot_process == "HESTON" and self.rate_process in (None, "FLAT"):
             rho = self.rho_sv
             cov = np.array([[1.0, rho], [rho, 1.0]])
             self._chol_2 = np.linalg.cholesky(cov)
 
-        # 3D correlation for Heston + Hull-White
         if self.spot_process == "HESTON" and self.rate_process == "HULLWHITE":
             rho_sv = self.rho_sv
             rho_sr = self.rho_sr
@@ -161,17 +144,24 @@ class Model:
             )
             self._chol_3 = np.linalg.cholesky(cov)
 
-    # --------------------------------------------------------
-    # main simulation entry point
-    # --------------------------------------------------------
+        if self.spot_process == "GBM" and self.rate_process == "HULLWHITE" and self.vol_process == "RBERGOMI":
+          rho_sv = self.rough_rho   # spot vol corr
+          rho_sr = self.rho_sr      # spot rate corr
+          rho_vr = self.rho_vr      # rate vol corr
 
-    def simulate_paths(
-        self,
-        maturity_years: float,
-        antithetic: bool = False,
-    ) -> Dict[str, np.ndarray]:
+          cov = np.array(
+              [
+                  [1.0,    rho_sv, rho_sr],
+                  [rho_sv, 1.0,    rho_vr],
+                  [rho_sr, rho_vr, 1.0   ],
+              ]
+          )
+          self._chol_3 = np.linalg.cholesky(cov)
+
+    
+    def simulate_paths(self,maturity_years: float,antithetic: bool = False) -> Dict[str, np.ndarray]:
         """
-        Unified simulation interface for all configurations.
+        Simulation interface for all model configurations.
 
         Returns a dictionary like:
             {
@@ -191,7 +181,7 @@ class Model:
         if self.spot_process is None and self.rate_process == "HULLWHITE":
             return self._simulate_hullwhite_rate(maturity_years, antithetic)
 
-                # spot + flat rate
+        # spot + flat rate
         if self.spot_process == "GBM" and self.rate_process in (None, "FLAT"):
             # constant Black–Scholes vol
             if self.vol_process in (None, "FLAT"):
@@ -205,6 +195,10 @@ class Model:
             if self.vol_process == "RFSV":
                 return self._simulate_gbm_rfsV_flat(maturity_years, antithetic)
 
+            # rough Bergomi (Volterra) stochastic volatility
+            if self.vol_process == "RBERGOMI":
+                return self._simulate_gbm_rbergomi_flat(maturity_years, antithetic)
+
             raise ValueError(
                 f"Unsupported vol_process={self.vol_process} "
                 f"for spot_process=GBM, rate_process={self.rate_process}"
@@ -216,16 +210,40 @@ class Model:
         # Heston + Hull–White hybrid
         if self.spot_process == "HESTON" and self.rate_process == "HULLWHITE":
             return self._simulate_heston_hullwhite(maturity_years, antithetic)
+        
+        # GBM spot + Hull–White rate
+        if self.spot_process == "GBM" and self.rate_process == "HULLWHITE":
+            if self.vol_process == "RBERGOMI":
+                return self._simulate_gbm_rbergomi_hullwhite(maturity_years, antithetic)
+            raise ValueError(f"Unsupported vol_process={self.vol_process} for spot_process=GBM, rate_process=HULLWHITE")
 
         raise ValueError(
             f"Unsupported combination: spot_process={self.spot_process}, "
             f"rate_process={self.rate_process}"
         )
+    
+    def _df_at_times(self, times: np.ndarray) -> np.ndarray:
+        """Discount factor DF(0,t) evaluated at times (years).
+        If disc_times/disc_rates provided: interpolate zero rates (cont. comp) and compute DF=exp(-r(t)*t).
+        Otherwise uses flat DF=exp(-r0*t).
+        """
+        if self.disc_times is None or self.disc_rates is None:
+            return np.exp(-float(self.r0) * times)
 
-    # --------------------------------------------------------
-    # pure rate: flat
-    # --------------------------------------------------------
+        t = self.disc_times
+        r = self.disc_rates
+        if t.ndim != 1 or r.ndim != 1 or t.shape[0] != r.shape[0] or t.shape[0] < 2:
+            raise ValueError("disc_times and disc_rates must be 1D arrays of same length >= 2")
 
+        if not np.all(np.diff(t) >= 0):
+            idx = np.argsort(t)
+            t = t[idx]
+            r = r[idx]
+
+        r_t = np.interp(times, t, r)
+        r_t[times <= t[0]] = r[0]
+        r_t[times >= t[-1]] = r[-1]
+        return np.exp(-r_t * times)
     def _simulate_flat_rate(
         self,
         maturity_years: float,
@@ -250,9 +268,6 @@ class Model:
 
         return {"r": r, "df": df}
 
-    # --------------------------------------------------------
-    # pure rate: Hull–White
-    # --------------------------------------------------------
 
     def _simulate_hullwhite_rate(
         self,
@@ -372,6 +387,8 @@ class Model:
 
         dt = maturity_years / n_steps
         sqrt_dt = np.sqrt(dt)
+        times = np.linspace(0.0, maturity_years, n_steps + 1)
+        df_curve = self._df_at_times(times)
 
         n_paths = self.n_paths
         if antithetic:
@@ -385,16 +402,15 @@ class Model:
 
         S = np.empty((n_paths, n_steps + 1))
         df = np.empty((n_paths, n_steps + 1))
+        df[:] = df_curve[None, :]
 
         S[:, 0] = self.s0
-        df[:, 0] = 1.0
 
         for k in range(n_steps):
             dW = Z[:, k] * sqrt_dt
             drift = (self.r0 - 0.5 * self.sigma**2) * dt
             diff = self.sigma * dW
             S[:, k + 1] = S[:, k] * np.exp(drift + diff)
-            df[:, k + 1] = df[:, k] * np.exp(-self.r0 * dt)
 
         return {"S": S, "df": df}
     def _simulate_gbm_rough_fbm_flat(
@@ -414,6 +430,8 @@ class Model:
             n_steps, maturity_years, antithetic
         )
         sqrt_dt = np.sqrt(dt)
+        times = np.linspace(0.0, maturity_years, n_steps + 1)
+        df_curve = self._df_at_times(times)
 
         H = float(self.rough_H)
         nu = float(self.rough_nu)
@@ -431,8 +449,8 @@ class Model:
         # simulate GBM under flat rate r0 with path-dependent sigma
         S = np.empty((n_paths, n_steps + 1))
         df = np.empty((n_paths, n_steps + 1))
+        df[:] = df_curve[None, :]
         S[:, 0] = self.s0
-        df[:, 0] = 1.0
 
         # Brownian shocks for the spot
         if antithetic:
@@ -452,7 +470,6 @@ class Model:
             diff = sigma_k * dW_S
 
             S[:, k + 1] = S[:, k] * np.exp(drift + diff)
-            df[:, k + 1] = df[:, k] * np.exp(-r_t * dt)
 
         # expose sigma paths so you can inspect/compare
         return {"S": S, "df": df, "sigma": sigma_t}
@@ -479,6 +496,8 @@ class Model:
             n_steps, maturity_years, antithetic
         )
         sqrt_dt = np.sqrt(dt)
+        times = np.linspace(0.0, maturity_years, n_steps + 1)
+        df_curve = self._df_at_times(times)
 
         H = float(self.rough_H)
         nu = float(self.rough_nu)
@@ -506,8 +525,8 @@ class Model:
         # simulate GBM with this stochastic volatility
         S = np.empty((n_paths, n_steps + 1))
         df = np.empty((n_paths, n_steps + 1))
+        df[:] = df_curve[None, :]
         S[:, 0] = self.s0
-        df[:, 0] = 1.0
 
         if antithetic:
             n_base = n_paths // 2
@@ -526,7 +545,6 @@ class Model:
             diff = sigma_k * dW_S
 
             S[:, k + 1] = S[:, k] * np.exp(drift + diff)
-            df[:, k + 1] = df[:, k] * np.exp(-r_t * dt)
 
         return {"S": S, "df": df, "sigma": sigma_t}
     # --------------------------------------------------------
@@ -547,6 +565,8 @@ class Model:
 
         dt = maturity_years / n_steps
         sqrt_dt = np.sqrt(dt)
+        times = np.linspace(0.0, maturity_years, n_steps + 1)
+        df_curve = self._df_at_times(times)
 
         n_paths = self.n_paths
         if antithetic:
@@ -561,10 +581,10 @@ class Model:
         S = np.empty((n_paths, n_steps + 1))
         v = np.empty((n_paths, n_steps + 1))
         df = np.empty((n_paths, n_steps + 1))
+        df[:] = df_curve[None, :]
 
         S[:, 0] = self.s0
         v[:, 0] = self.v0
-        df[:, 0] = 1.0
 
         for k in range(n_steps):
             dW = Z[:, k, :] @ self._chol_2.T * sqrt_dt
@@ -581,13 +601,287 @@ class Model:
             dlogS = (r_t - 0.5 * v_t) * dt + sqrt_v * dW_S
             S_next = S[:, k] * np.exp(dlogS)
 
-            df_next = df[:, k] * np.exp(-r_t * dt)
 
             S[:, k + 1] = S_next
             v[:, k + 1] = v_next
-            df[:, k + 1] = df_next
 
         return {"S": S, "v": v, "df": df}
+
+
+    # --------------------------------------------------------
+    # GBM spot + rough Bergomi variance (flat rate)
+    # --------------------------------------------------------
+    def _xi0_at_times(self, times: np.ndarray) -> np.ndarray:
+        """Forward variance curve xi0(t) evaluated at times (years).
+
+        - If xi0_times/xi0_values are provided, uses linear interpolation with flat extrapolation.
+        - Otherwise defaults to constant sigma^2.
+        """
+        if getattr(self, "xi0_times", None) is None or getattr(self, "xi0_values", None) is None:
+            return np.full_like(times, float(self.sigma) ** 2, dtype=float)
+
+        t = self.xi0_times
+        x = self.xi0_values
+        if t.ndim != 1 or x.ndim != 1 or t.shape[0] != x.shape[0] or t.shape[0] < 2:
+            raise ValueError("xi0_times and xi0_values must be 1D arrays of same length >= 2")
+
+        # Ensure sorted
+        if not np.all(np.diff(t) >= 0):
+            idx = np.argsort(t)
+            t = t[idx]
+            x = x[idx]
+
+        # Linear interpolation + flat extrapolation
+        out = np.interp(times, t, x)
+        out[times <= t[0]] = x[0]
+        out[times >= t[-1]] = x[-1]
+        return out
+    def _fwd_rate_at_times(self, times: np.ndarray) -> np.ndarray:
+        """Instantaneous forward rate f(0,t) from DF(0,t).
+
+        Computed by finite differences on -log DF. Uses small epsilon and is stable for simulation grid.
+        """
+        eps = 1e-5
+        t1 = np.maximum(times - eps, 0.0)
+        t2 = times + eps
+        df1 = self._df_at_times(t1)
+        df2 = self._df_at_times(t2)
+        # f(0,t) ≈ ( -log DF(t2) + log DF(t1) ) / (t2 - t1)
+        return (-np.log(df2) + np.log(df1)) / (t2 - t1)
+    def _simulate_gbm_rbergomi_flat(
+        self,
+        maturity_years: float,
+        antithetic: bool,
+    ) -> Dict[str, np.ndarray]:
+        """
+        Rough Bergomi-style model (discrete-time Volterra approximation).
+
+        We simulate a Volterra Gaussian process:
+            Y_t = sqrt(2H) * ∫_0^t (t-s)^(H-1/2) dW^v_s
+
+        and set the instantaneous variance to
+            v_t = xi0(t) * exp( eta * Y_t - 0.5 * eta^2 * t^(2H) )
+
+        The spot is simulated under risk-neutral dynamics
+            dS_t = S_t * ( r dt + sqrt(v_t) dW^S_t )
+
+        with corr(dW^S, dW^v) = rho.
+
+        Notes:
+        - This is a proper rough Bergomi volatility construction (Volterra rough driver + leverage).
+        - The Volterra integral is approximated by a Riemann sum on the simulation grid (O(n_steps^2)).
+          For calibration you will likely replace this with a faster hybrid / convolution scheme later.
+        """
+        n_steps = int(maturity_years * self.steps_per_year)
+        if n_steps <= 0:
+            raise ValueError("maturity_years * steps_per_year must be >= 1")
+
+        H = float(self.rough_H)
+        if not (0.0 < H < 0.5):
+            raise ValueError("rough_H must be in (0, 0.5)")
+
+        eta = float(self.rough_nu)
+        rho = float(self.rough_rho)
+        if not (-1.0 <= rho <= 1.0):
+            raise ValueError("rough_rho must be in [-1, 1]")
+
+        dt = maturity_years / n_steps
+        times = np.linspace(0.0, maturity_years, n_steps + 1)  # includes 0
+
+        n_paths = self.n_paths
+        if antithetic and n_paths % 2 != 0:
+            raise ValueError("For antithetic, n_paths must be even.")
+
+        # --- Brownian shocks: build correlated (dW_S, dW_v)
+        if antithetic:
+            n_base = n_paths // 2
+            Z1_half = self.rng.standard_normal(size=(n_base, n_steps))
+            Z2_half = self.rng.standard_normal(size=(n_base, n_steps))
+            Z1 = np.vstack([Z1_half, -Z1_half])
+            Z2 = np.vstack([Z2_half, -Z2_half])
+        else:
+            Z1 = self.rng.standard_normal(size=(n_paths, n_steps))
+            Z2 = self.rng.standard_normal(size=(n_paths, n_steps))
+
+        dW_v = np.sqrt(dt) * Z2
+        dW_S = np.sqrt(dt) * (rho * Z2 + np.sqrt(max(0.0, 1.0 - rho * rho)) * Z1)
+
+        # --- Volterra process Y on the grid (FFT convolution, O(n_steps log n_steps))
+        # We need Y_i = sum_{k=0}^{i-1} g_{i-k} * dW_v[k], with g_j = sqrt(2H) * (j*dt)^(H-1/2), j=1..n_steps.
+        # This is a standard 1D convolution of dW_v with kernel g (lags), taking the first n_steps outputs.
+
+        # Precompute kernel g (length n_steps): g[0] corresponds to lag 1 (dt)
+        j = np.arange(1, n_steps + 1, dtype=float)
+        g = np.sqrt(2.0 * H) * (j * dt) ** (H - 0.5)  # (n_steps,)
+
+        # FFT-based convolution (batch over paths)
+        # Pad to length L >= n_steps + n_steps - 1
+        L = 1 << int(math.ceil(math.log2(2 * n_steps - 1)))
+        # rfft along time axis
+        G = np.fft.rfft(np.pad(g, (0, L - n_steps)))
+        DV = np.fft.rfft(np.pad(dW_v, ((0, 0), (0, L - n_steps))), axis=1)
+        conv = np.fft.irfft(DV * G, n=L, axis=1)[:, :n_steps]  # (n_paths, n_steps)
+
+        Y = np.zeros((n_paths, n_steps + 1), dtype=float)
+        Y[:, 1:] = conv
+
+        # --- Forward variance curve xi0(t)
+        xi0 = self._xi0_at_times(times)  # variance
+
+        t_pow = times ** (2.0 * H)
+        expo = eta * Y - 0.5 * (eta ** 2) * t_pow
+        expo = np.clip(expo, -50.0, 50.0)   # prevents overflow/underflow by putting a ball ie stopping time 
+        v = xi0[None, :] * np.exp(expo)  # (n_paths, n_steps+1)
+
+        # --- Spot and discount factors
+        S = np.empty((n_paths, n_steps + 1), dtype=float)
+        df = np.empty((n_paths, n_steps + 1), dtype=float)
+        S[:, 0] = self.s0
+        
+        df_curve = self._df_at_times(times)
+        df[:] = df_curve[None, :]
+        fwd = self._fwd_rate_at_times(times)  # length n_steps+1
+        for k in range(n_steps):
+            r_k = 0.0# interprete as spot = fwrd fwd[k] ie driftless under T-forward measure approximation
+            vol = np.sqrt(np.maximum(v[:, k], 0.0))
+            #S[:, k + 1] = S[:, k] * np.exp((r_k - 0.5 * vol * vol) * dt + vol * dW_S[:, k])
+            if not np.isfinite(dt):
+                raise ValueError(f"dt is not finite: {dt}")
+
+            if not np.all(np.isfinite(vol)):
+                bad = np.where(~np.isfinite(vol))[0][:10]
+                print("k=", k, "bad vol idx:", bad)
+                print("v[bad,k]=", v[bad, k])
+                raise ValueError("vol has NaN/Inf")
+
+            if not np.all(np.isfinite(dW_S[:, k])):
+                bad = np.where(~np.isfinite(dW_S[:, k]))[0][:10]
+                print("k=", k, "bad dW_S idx:", bad)
+                raise ValueError("dW_S has NaN/Inf")
+
+            incr = (r_k - 0.5 * vol * vol) * dt + vol * dW_S[:, k]
+
+            if not np.all(np.isfinite(incr)):
+                bad = np.where(~np.isfinite(incr))[0][:10]
+                print("k=", k, "bad incr idx:", bad)
+                print("r_k:", r_k, "dt:", dt)
+                print("vol[bad]:", vol[bad])
+                print("dW_S[bad,k]:", dW_S[bad, k])
+                raise ValueError("incr has NaN/Inf")
+
+            S[:, k + 1] = S[:, k] * np.exp(incr)
+
+            if not np.all(np.isfinite(S[:, k + 1])):
+                bad = np.where(~np.isfinite(S[:, k + 1]))[0][:10]
+                print("k=", k, "bad S idx:", bad)
+                print("S_prev:", S[bad, k])
+                print("incr:", incr[bad])
+                raise ValueError("S became NaN/Inf")
+        return {"S": S, "v": v, "df": df}
+
+    def _simulate_gbm_rbergomi_hullwhite(self,maturity_years: float, antithetic: bool) -> Dict[str, np.ndarray]:
+        """
+        rBergomi volatility + Hull–White short rate hybrid.
+
+        - Vol driver: Volterra Gaussian process Y from dW_v
+        - Variance:   v_t = xi0(t) * exp( eta * Y_t - 0.5 * eta^2 * t^(2H) )
+        - Rate:       dr_t = a (b - r_t) dt + sigma_r dW_r
+        - Discount:   df_{k+1} = df_k * exp(-r_k dt)   (pathwise)
+        - Spot:       dlogS = (r_t - 0.5 v_t) dt + sqrt(v_t) dW_S
+        """
+        if self._chol_3 is None:
+            # build in case params changed
+            self._build_correlations()
+        if self._chol_3 is None:
+            raise RuntimeError("3D correlation matrix not built for rBergomi + HullWhite.")
+
+        n_steps = int(maturity_years * self.steps_per_year)
+        if n_steps <= 0:
+            raise ValueError("maturity_years * steps_per_year must be >= 1")
+
+        H = float(self.rough_H)
+        if not (0.0 < H < 0.5):
+            raise ValueError("rough_H must be in (0, 0.5)")
+
+        eta = float(self.rough_nu)
+        rho = float(self.rough_rho)
+        if not (-1.0 <= rho <= 1.0):
+            raise ValueError("rough_rho must be in [-1, 1]")
+
+        dt = maturity_years / n_steps
+        sqrt_dt = np.sqrt(dt)
+        times = np.linspace(0.0, maturity_years, n_steps + 1)
+
+        n_paths = self.n_paths
+        if antithetic and n_paths % 2 != 0:
+            raise ValueError("For antithetic, n_paths must be even.")
+
+        # --- Correlated Gaussian shocks (S, v, r)
+        if antithetic:
+            half = n_paths // 2
+            Z_half = self.rng.standard_normal(size=(half, n_steps, 3))
+            Z = np.vstack([Z_half, -Z_half])
+        else:
+            Z = self.rng.standard_normal(size=(n_paths, n_steps, 3))
+
+        dW = (Z @ self._chol_3.T) * sqrt_dt  # (n_paths, n_steps, 3)
+        dW_S = dW[:, :, 0]                  # spot driver
+        dW_v = dW[:, :, 1]                  # vol driver
+        dW_r = dW[:, :, 2]                  # rate driver
+
+        # --- Build Volterra process Y via FFT convolution (same logic as flat version)
+        # Kernel g_j = sqrt(2H) * (j*dt)^(H-1/2), j=1..n_steps
+        j = np.arange(1, n_steps + 1, dtype=float)
+        g = np.sqrt(2.0 * H) * (j * dt) ** (H - 0.5)  # (n_steps,)
+
+        L = 1 << int(math.ceil(math.log2(2 * n_steps - 1)))
+        G = np.fft.rfft(np.pad(g, (0, L - n_steps)))
+
+        DV = np.fft.rfft(np.pad(dW_v, ((0, 0), (0, L - n_steps))), axis=1)
+        conv = np.fft.irfft(DV * G, n=L, axis=1)[:, :n_steps]  # (n_paths, n_steps)
+
+        Y = np.zeros((n_paths, n_steps + 1), dtype=float)
+        Y[:, 1:] = conv
+
+        # --- Forward variance curve xi0(t)
+        xi0 = self._xi0_at_times(times)  # (n_steps+1,)
+
+        t_pow = times ** (2.0 * H)
+        expo = eta * Y - 0.5 * (eta ** 2) * t_pow
+        expo = np.clip(expo, -50.0, 50.0)
+        v = xi0[None, :] * np.exp(expo)  # (n_paths, n_steps+1)
+
+        # --- Hull–White rate + pathwise DF
+        r = np.empty((n_paths, n_steps + 1), dtype=float)
+        df = np.empty((n_paths, n_steps + 1), dtype=float)
+        r[:, 0] = float(self.r0)
+        df[:, 0] = 1.0
+
+        a = float(self.a)
+        b = float(self.b)
+        sigma_r = float(self.sigma_r)
+
+        for k in range(n_steps):
+            r_t = r[:, k]
+            dr = a * (b - r_t) * dt + sigma_r * dW_r[:, k]
+            r[:, k + 1] = r_t + dr
+
+            # discount over [t_k, t_{k+1}] using r_t
+            df[:, k + 1] = df[:, k] * np.exp(-r_t * dt)
+
+        # --- Spot
+        S = np.empty((n_paths, n_steps + 1), dtype=float)
+        S[:, 0] = float(self.s0)
+
+        for k in range(n_steps):
+            r_t = r[:, k]
+            v_t = np.maximum(v[:, k], 0.0)
+            vol = np.sqrt(v_t)
+
+            dlogS = (r_t - 0.5 * v_t) * dt + vol * dW_S[:, k]
+            S[:, k + 1] = S[:, k] * np.exp(dlogS)
+
+        return {"S": S, "v": v, "r": r, "df": df}
 
     # --------------------------------------------------------
     # Heston + Hull–White hybrid
@@ -661,14 +955,13 @@ class Model:
         """
         Returns a list of parameter names that are actually used
         by the current (spot_process, rate_process) configuration.
-
-        This is just a convenience for Greeks / main.py.
         """
-        params: list[str] = []
+        has_curve = (self.disc_times is not None) and (self.disc_rates is not None)
+        rate_key = "disc_rates_parallel" if has_curve else "r0"
 
-        # Rate-only models
+        
         if self.spot_process is None and self.rate_process == "FLAT":
-            return ["r0"]
+            return [rate_key]
 
         if self.spot_process is None and self.rate_process == "HULLWHITE":
             return ["r0", "a", "b", "sigma_r"]
@@ -676,40 +969,32 @@ class Model:
         # GBM spot + flat rate
         if self.spot_process == "GBM" and self.rate_process in (None, "FLAT"):
             if self.vol_process in (None, "FLAT"):
-                return ["s0", "sigma", "r0"]
+                return ["s0", "sigma", rate_key]
 
             if self.vol_process == "ROUGH_FBM":
-                # typically you might bump H and nu
-                return ["s0", "sigma", "r0", "rough_H", "rough_nu"]
+                return ["s0", rate_key, "rough_H", "rough_nu"]
 
             if self.vol_process == "RFSV":
-                return ["s0", "sigma", "r0", "rough_H", "rough_nu", "rough_alpha"]
-
-            # Fallback:
-            return ["s0", "sigma", "r0"]
+                return ["s0", rate_key, "rough_H", "rough_nu", "rough_alpha"]
+            
+            if self.vol_process == "RBERGOMI":
+                return ["s0", "rough_nu", "rough_rho", "xi0_level", rate_key]
+            # fallback
+            return ["s0", "sigma", rate_key]
 
         # Heston spot + flat rate
         if self.spot_process == "HESTON" and self.rate_process in (None, "FLAT"):
-            return ["s0", "v0", "r0", "kappa", "theta", "xi", "rho_sv"]
+            return ["s0", "v0", rate_key, "kappa", "theta", "xi", "rho_sv"]
 
         # Heston + Hull–White hybrid
         if self.spot_process == "HESTON" and self.rate_process == "HULLWHITE":
-            return [
-                "s0",
-                "v0",
-                "r0",
-                "kappa",
-                "theta",
-                "xi",
-                "rho_sv",
-                "a",
-                "b",
-                "sigma_r",
-                "rho_sr",
-                "rho_vr",
-            ]
-
+            return ["s0", "v0", "r0", "kappa", "theta", "xi", "rho_sv","a", "b", "sigma_r", "rho_sr", "rho_vr"]
         
-        return params
+        # Hybrid rough bergomi and HW on rates side
+        if self.spot_process == "GBM" and self.rate_process == "HULLWHITE" and self.vol_process == "RBERGOMI":
+            return ["s0", "rough_nu", "rough_rho", "xi0_level", "a", "b", "sigma_r", "rho_sr", "rho_vr"]
+
+
+        return []
 
 

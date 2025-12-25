@@ -1,0 +1,3 @@
+[console_scripts]
+pricer = pricer.main:main
+pricer-calibrate = pricer.calibrate:main
