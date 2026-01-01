@@ -205,6 +205,7 @@ class Model:
                 f"for spot_process=GBM, rate_process={self.rate_process}"
             )
 
+
         if self.spot_process == "HESTON" and self.rate_process in (None, "FLAT"):
             return self._simulate_heston_flat(maturity_years, antithetic)
 
@@ -212,11 +213,19 @@ class Model:
         if self.spot_process == "HESTON" and self.rate_process == "HULLWHITE":
             return self._simulate_heston_hullwhite(maturity_years, antithetic)
         
-        # GBM spot + Hull–White rate
+        # GBM spot + Hull–White rate and Bergomi:
         if self.spot_process == "GBM" and self.rate_process == "HULLWHITE":
+            #  GBM + HW with constant vol
+            if self.vol_process in (None, "FLAT"):
+                return self._simulate_gbm_hw(maturity_years, antithetic)
+
+            #  GBM + rBergomi + HW
             if self.vol_process == "RBERGOMI":
                 return self._simulate_gbm_rbergomi_hullwhite(maturity_years, antithetic)
-            raise ValueError(f"Unsupported vol_process={self.vol_process} for spot_process=GBM, rate_process=HULLWHITE")
+
+            raise ValueError(
+                f"Unsupported vol_process={self.vol_process} for spot_process=GBM, rate_process=HULLWHITE"
+            )
 
         raise ValueError(
             f"Unsupported combination: spot_process={self.spot_process}, "
@@ -419,6 +428,98 @@ class Model:
             S[:, k + 1] = S[:, k] * np.exp(drift + diff)
 
         return {"S": S, "df": df}
+    def _simulate_gbm_hw(self, maturity_years: float, antithetic: bool):
+        """
+        Simulate GBM spot under Q with Hull–White short rate for discounting:
+            dS/S = r_t dt + sigma dW^S
+            dr   = a(b - r) dt + sigma_r dW^r
+        with constant corr d<W^S, W^r> = rho_sr dt.
+
+        Returns whatever your pricer expects (typically paths and discount factors).
+        """
+        
+
+        # --- numerics ---
+        steps = int(self.steps_per_year * maturity_years)
+        dt = maturity_years / steps
+        sqdt = np.sqrt(dt)
+
+        n = int(self.n_paths)
+        s0 = float(self.s0)
+
+        # --- parameters ---
+        sigma = float(self.sigma)
+
+        a = float(self.hw_a if hasattr(self, "hw_a") else self.a)
+        b = float(self.hw_b if hasattr(self, "hw_b") else self.b)
+        sigma_r = float(self.hw_sigma_r if hasattr(self, "hw_sigma_r") else self.sigma_r)
+
+        r0 = float(self.r0)
+        rho = float(getattr(self, "rho_sr", 0.0))
+
+        # safety
+        rho = max(-1.0, min(1.0, rho))
+        rho_ortho = np.sqrt(max(0.0, 1.0 - rho * rho))
+
+        # --- allocate ---
+        S = np.empty((n, steps + 1), dtype=float)
+        r = np.empty((n, steps + 1), dtype=float)
+        D = np.empty((n, steps + 1), dtype=float)
+
+        S[:, 0] = s0
+        r[:, 0] = r0
+        D[:, 0] = 1.0
+
+        rng = np.random.default_rng(getattr(self, "seed", None))
+
+        # generate base normals; if antithetic, pair them
+        def normals(size):
+            z = rng.standard_normal(size)
+            if antithetic:
+                return np.concatenate([z, -z], axis=0)[:size[0], :size[1]]
+            return z
+
+        # For antithetic with n paths, easiest is to generate for n//2 and mirror
+        # But keep it simple/robust:
+        Zs = rng.standard_normal((n, steps))
+        Zp = rng.standard_normal((n, steps))
+        if antithetic:
+            half = n // 2
+            Zs[:half] = rng.standard_normal((half, steps))
+            Zs[half:2*half] = -Zs[:half]
+            Zp[:half] = rng.standard_normal((half, steps))
+            Zp[half:2*half] = -Zp[:half]
+            if 2*half < n:
+                # last odd path
+                Zs[-1] = rng.standard_normal((steps,))
+                Zp[-1] = rng.standard_normal((steps,))
+
+        # correlated rate increment driver
+        Zr = rho * Zs + rho_ortho * Zp
+
+        # --- evolve ---
+        for k in range(steps):
+            rk = r[:, k]
+
+            # short rate Euler
+            r[:, k + 1] = rk + a * (b - rk) * dt + sigma_r * sqdt * Zr[:, k]
+
+            # discount factor (left-point)
+            D[:, k + 1] = D[:, k] * np.exp(-rk * dt)
+
+            # spot exact log step with rk
+            S[:, k + 1] = S[:, k] * np.exp((rk - 0.5 * sigma * sigma) * dt + sigma * sqdt * Zs[:, k])
+
+        # ---- return in your project’s expected format ----
+        # Many of your simulators return a dict-like bundle; adapt if needed:
+        return {
+            "S": S,
+            "r": r,
+            "df": D,
+            "dt": dt,
+            "t": np.linspace(0.0, maturity_years, steps + 1),
+        }
+
     def _simulate_gbm_rough_fbm_flat(
         self,
         maturity_years: float,
